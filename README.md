@@ -39,8 +39,8 @@ Image publishing works automatically after the project is pushed to GitHub. The 
    - `DEPLOY_SSH_KEY`: private key for that user
    - `DEPLOY_PATH`: absolute server directory for `compose.prod.yaml`, such as `/opt/ci-cd-test`
    - `DEPLOY_PORT` (optional): SSH port; defaults to `22`
-3. Add the environment variable `DEPLOY_ENABLED` with the value `true`.
-4. On the server, install Docker Engine with the Compose plugin and log in once to GHCR using a fine-grained personal access token with **Packages: Read** permission:
+3. Add the repository variable `DEPLOY_ENABLED` with the value `true`. This makes the deployment job eligible to start; the connection details remain scoped to the `production` environment.
+4. If the GHCR package is private, log in once on the server using a fine-grained personal access token with **Packages: Read** permission:
 
    ```bash
    echo "<GHCR_READ_TOKEN>" | docker login ghcr.io -u "<GITHUB_USER>" --password-stdin
