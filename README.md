@@ -28,6 +28,34 @@ docker build -t ci-cd-test:local .
 docker run --rm -p 8080:8080 ci-cd-test:local
 ```
 
+## Verify Docker volume persistence
+
+The production profile stores H2 data below `/app/data`. `compose.prod.yaml` mounts that directory to the named volume `ci-cd-test-data`, so application data remains after a container is recreated.
+
+The demo override supplies local-only Basic Auth credentials; it is never used by the production deployment.
+
+```bash
+docker build -t ci-cd-test:persistence .
+IMAGE=ci-cd-test:persistence APP_PORT=18080 DATA_VOLUME_NAME=ci-cd-test-volume-proof \
+  docker compose -p ci-cd-volume-proof -f compose.prod.yaml -f compose.persistence-demo.yaml up -d --wait
+
+curl -u persistence:persistence-password -X POST http://localhost:18080/api/notes \
+  -H 'Content-Type: application/json' -d '{"content":"volume persistence proof"}'
+
+# Remove and recreate only the container. Do not append -v: that removes the named volume.
+IMAGE=ci-cd-test:persistence APP_PORT=18080 DATA_VOLUME_NAME=ci-cd-test-volume-proof \
+  docker compose -p ci-cd-volume-proof -f compose.prod.yaml -f compose.persistence-demo.yaml down
+IMAGE=ci-cd-test:persistence APP_PORT=18080 DATA_VOLUME_NAME=ci-cd-test-volume-proof \
+  docker compose -p ci-cd-volume-proof -f compose.prod.yaml -f compose.persistence-demo.yaml up -d --wait
+
+docker volume inspect ci-cd-test-volume-proof
+curl -u persistence:persistence-password http://localhost:18080/api/notes/<NOTE_ID>
+```
+
+Replace `<NOTE_ID>` with the ID returned by the `POST`. The final `GET` must return the same content, proving that data survived the container recreation. The `persistence` user exists only in the local override; do not use its credentials in production.
+
+This named-volume setup protects data from a container recreation on the same Docker host. For service-critical production data, also use backups and an external managed database strategy to cover host loss and migrations.
+
 ## Enable production deployment
 
 Image publishing works automatically after the project is pushed to GitHub. The server deployment is deliberately disabled until a production environment is configured.

@@ -1,0 +1,6 @@
+services:
+  app:
+    environment:
+      # Local-only credentials for the persistence demonstration. Do not use in production.
+      SPRING_SECURITY_USER_NAME: persistence
+      SPRING_SECURITY_USER_PASSWORD: persistence-password

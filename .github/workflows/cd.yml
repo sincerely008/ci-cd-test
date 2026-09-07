@@ -113,6 +113,6 @@ jobs:
           set -euo pipefail
           cd "$DEPLOY_PATH"
           docker compose -f compose.prod.yaml pull
-          docker compose -f compose.prod.yaml up -d --remove-orphans
+          docker compose -f compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 120
           docker image prune --force
           REMOTE_SCRIPT

@@ -36,6 +36,11 @@ jobs:
       - name: Run tests and package the application
         run: ./gradlew --no-daemon clean check bootJar
 
+      - name: Build and validate the container definition
+        run: |
+          docker build --tag ci-cd-test:ci .
+          IMAGE=ci-cd-test:ci docker compose -f compose.prod.yaml config --quiet
+
       - name: Upload test reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
