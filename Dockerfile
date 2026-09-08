@@ -14,7 +14,9 @@ RUN ./gradlew --no-daemon bootJar
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-RUN addgroup --system spring && adduser --system --ingroup spring spring
+RUN addgroup --system spring \
+    && adduser --system --ingroup spring spring \
+    && chown -R spring:spring /app
 COPY --from=build /workspace/build/libs/*.jar app.jar
 
 USER spring

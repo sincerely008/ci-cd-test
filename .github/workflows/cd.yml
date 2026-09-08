@@ -7,15 +7,15 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  id-token: write
 
 concurrency:
   group: production-deployment
   cancel-in-progress: false
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'ci-cd-test' }}
 
 jobs:
   publish:
@@ -24,23 +24,33 @@ jobs:
     timeout-minutes: 20
     outputs:
       image: ${{ steps.image.outputs.image }}
+      registry: ${{ steps.login-ecr.outputs.registry }}
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Validate ECR configuration
+        run: |
+          test -n "${AWS_REGION}"
+          test -n "${ECR_REPOSITORY}"
+
+      - name: Configure AWS credentials through GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v6
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          role-session-name: ci-cd-test-ecr-publish
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
           tags: |
             type=sha,format=long,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
@@ -49,18 +59,20 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and publish image
+        id: build-image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Select immutable image tag
+      - name: Select immutable image digest
         id: image
-        run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        run: echo "image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}@${{ steps.build-image.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Deploy to production server
@@ -93,11 +105,38 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          APP_SECURITY_USER: ${{ secrets.APP_SECURITY_USER }}
+          APP_SECURITY_PASSWORD: ${{ secrets.APP_SECURITY_PASSWORD }}
         run: |
           test -n "$DEPLOY_USER"
           test -n "$DEPLOY_PATH"
+          test -n "$POSTGRES_DB"
+          test -n "$POSTGRES_USER"
+          test -n "$POSTGRES_PASSWORD"
+          test -n "$APP_SECURITY_USER"
+          test -n "$APP_SECURITY_PASSWORD"
           ssh -p "${DEPLOY_PORT:-22}" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
           scp -P "${DEPLOY_PORT:-22}" compose.prod.yaml "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/compose.prod.yaml"
+
+      - name: Write protected runtime environment
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          APP_SECURITY_USER: ${{ secrets.APP_SECURITY_USER }}
+          APP_SECURITY_PASSWORD: ${{ secrets.APP_SECURITY_PASSWORD }}
+        run: |
+          runtime_env="$(printf 'POSTGRES_DB=%s\nPOSTGRES_USER=%s\nPOSTGRES_PASSWORD=%s\nAPP_SECURITY_USER=%s\nAPP_SECURITY_PASSWORD=%s\n' "$POSTGRES_DB" "$POSTGRES_USER" "$POSTGRES_PASSWORD" "$APP_SECURITY_USER" "$APP_SECURITY_PASSWORD")"
+          runtime_env_base64="$(printf '%s' "$runtime_env" | base64 | tr -d '\n')"
+          ssh -p "${DEPLOY_PORT:-22}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "umask 077 && printf '%s' '$runtime_env_base64' | base64 --decode > '$DEPLOY_PATH/.env' && chmod 600 '$DEPLOY_PATH/.env'"
 
       - name: Pull and restart application
         env:
@@ -106,13 +145,18 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           IMAGE: ${{ needs.publish.outputs.image }}
+          ECR_REGISTRY: ${{ needs.publish.outputs.registry }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
           APP_PORT: ${{ vars.APP_PORT || '8080' }}
         run: |
           ssh -p "${DEPLOY_PORT:-22}" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "IMAGE='$IMAGE' APP_PORT='$APP_PORT' DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE_SCRIPT'
+            "IMAGE='$IMAGE' ECR_REGISTRY='$ECR_REGISTRY' AWS_REGION='$AWS_REGION' APP_PORT='$APP_PORT' DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE_SCRIPT'
           set -euo pipefail
           cd "$DEPLOY_PATH"
+          command -v aws >/dev/null
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
           docker compose -f compose.prod.yaml pull
-          docker compose -f compose.prod.yaml up -d --remove-orphans
+          docker compose -f compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 120
           docker image prune --force
           REMOTE_SCRIPT
